@@ -3,11 +3,10 @@ import boto3
 from botocore.exceptions import ClientError
 
 import apache_beam as beam
-from apache_beam.io.kafka import ReadFromKafka, WriteToKafka
+from apache_beam.io.kafka import ReadFromKafka#, WriteToKafka
 from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions
 
-expansion_service = "localhost:8088"
-
+expansion_service = "localhost:<port# of the expansion service>"
 
 def get_secret():
     secret_name = "odni-msk-rest-proxy"
@@ -36,7 +35,9 @@ def get_secret():
 
 beam_options = PipelineOptions([], **{
     "job_name": "kafka_echo_demo",
+    "region": "us-east-1",
     "streaming": True,
+    "parallelism": 2,
 })
 
 beam_options.view_as(SetupOptions).save_main_session = True
@@ -46,24 +47,19 @@ aws_secret = json.loads(get_secret())
 try:
     with beam.Pipeline(options=beam_options) as pipeline: (
         pipeline
-        # | 'write' >> WriteToKafka(
-        #     producer_config={
-
-        #     }
-        # )
         | 'read' >> ReadFromKafka(
             consumer_config={
-                "bootstrap.servers": aws_secret["MSK_BROKERS"],
                 "group.id": "tap_kafka_read",
                 'auto.offset.reset': 'earliest',
+                "bootstrap.servers": aws_secret['MSK_BROKERS'],
                 "security.protocol": "SASL_SSL",
                 "sasl.mechanism": "OAUTHBEARER",
                 "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
                 "sasl.login.callback.handler.class": "software.amazon.msk.auth.iam.IAMOAuthBearerLoginCallbackHandler",
             },
-            topics=['test-topic'],
-            with_metadata=True,
+            topics=['raw'],
             max_num_records=3,
+            with_metadata=True,
             expansion_service=expansion_service,
         )
         | 'print' >> beam.Map(print)
