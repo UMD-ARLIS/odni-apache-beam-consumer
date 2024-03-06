@@ -1,22 +1,31 @@
 import json
-import boto3
-from botocore.exceptions import ClientError
+import pprint
+#import logging
+from datetime import datetime
 
 import apache_beam as beam
-from apache_beam.io.kafka import ReadFromKafka#, WriteToKafka
-from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions
+from beam_nuggets.io.kafkaio import KafkaConsume
+from apache_beam import Pipeline, Map, GroupByKey, ParDo, WindowInto
+from apache_beam.transforms.window import FixedWindows
+from apache_beam.transforms.trigger import Always
+from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions, StandardOptions
 
-expansion_service = "localhost:<port# of the expansion service>"
+class MSKTokenProvider():
+    def token(self):
+        from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
+
+        token, _ = MSKAuthTokenProvider.generate_auth_token(region)
+        return token
 
 def get_secret():
-    secret_name = "odni-msk-rest-proxy"
-    client = boto3.session.Session().client(service_name='secretsmanager', region_name="us-east-1")
+    import boto3
+    from botocore.exceptions import ClientError
 
     try:
-        get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+        get_secret_value_response = boto3.session.Session().client(service_name='secretsmanager', region_name=region).get_secret_value(SecretId="odni-msk-rest-proxy")
     except ClientError as e:
         if e.response['Error']['Code'] == 'ResourceNotFoundException':
-            print("The requested secret " + secret_name + " was not found")
+            print("The requested secret was not found")
         elif e.response['Error']['Code'] == 'InvalidRequestException':
             print("The request was invalid due to:", e)
         elif e.response['Error']['Code'] == 'InvalidParameterException':
@@ -33,36 +42,75 @@ def get_secret():
         else:
             return get_secret_value_response['SecretBinary']
 
-beam_options = PipelineOptions([], **{
-    "job_name": "kafka_echo_demo",
-    "region": "us-east-1",
-    "streaming": True,
+def print_element(elem):
+    pp.pprint(f"{elem}\n")
+    return elem
+
+def filter_out_nomes(log):
+  if log[0] is not None:
+    json_log = json.loads(log[1])
+    page_url = json_log["pageUrl"] if "pageUrl" in json_log else None
+    log_type = json_log["type"] if "type" in json_log else None
+
+    if (not (page_url is None or log_type is None) and
+        isinstance(page_url, str) and str(page_url).lower().find("openstreetmap") > -1 and
+        isinstance(log_type, str) and str(log_type).lower() == "visit"):
+        yield log
+  else:
+    print('we found a none! get it out')
+
+def test(elem):
+    return elem
+
+region = "us-east-1"
+date_tag = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+
+pp  = pprint.PrettyPrinter(indent=4, width=100)
+
+pl_options = PipelineOptions([], **{
+    "region": region,
     "parallelism": 2,
+    #"runner": "FlinkRunner",
+    "job_name": f"tap_filter_{date_tag}",
 })
 
-beam_options.view_as(SetupOptions).save_main_session = True
+pl_options.view_as(StandardOptions).streaming = True
+pl_options.view_as(SetupOptions).save_main_session = False #Must be set to "False" to prevent pickling issues
 
-aws_secret = json.loads(get_secret())
-
-try:
-    with beam.Pipeline(options=beam_options) as pipeline: (
+with Pipeline(options=pl_options) as pipeline:
+    user_tags = (
         pipeline
-        | 'read' >> ReadFromKafka(
+        | "read from topic" >> KafkaConsume(
             consumer_config={
-                "group.id": "tap_kafka_read",
-                'auto.offset.reset': 'earliest',
-                "bootstrap.servers": aws_secret['MSK_BROKERS'],
-                "security.protocol": "SASL_SSL",
-                "sasl.mechanism": "OAUTHBEARER",
-                "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
-                "sasl.login.callback.handler.class": "software.amazon.msk.auth.iam.IAMOAuthBearerLoginCallbackHandler",
-            },
-            topics=['raw'],
-            max_num_records=3,
-            with_metadata=True,
-            expansion_service=expansion_service,
+                "topic": "raw-logs",
+                "enable_auto_commit": "True",
+                'auto_offset_reset': 'earliest',
+                "security_protocol": "SASL_SSL",
+                "sasl_mechanism": "OAUTHBEARER",
+                "sasl_oauth_token_provider": MSKTokenProvider(),
+                "bootstrap_servers": json.loads(get_secret())['MSK_BROKERS'],
+                #NOTE: Setting "group_id" to a unique value each run will ensure that the offset
+                #will return to the earliest value and all records will be retrieved. If "group_id"
+                #stays constant then only the latest records will be retrieved
+                "group_id": f"raw-logs-reader_{date_tag}",
+                #"enable.auto.commit": "False",
+                #"consumer.timeout.ms": '15000'
+            }
         )
-        | 'print' >> beam.Map(print)
+        #| "agg every 60 sec" >> WindowInto(
+        #    windowfn=FixedWindows(60),
+        #    trigger=AfterWatermark(
+        #        late=AfterCount(1),
+        #        early=AfterProcessingTime(delay=1 * 60)
+        #    ),
+        #    accumulation_mode=AccumulationMode.ACCUMULATING
+        #)
+        | "filter out NOME logs" >> ParDo(filter_out_nomes)
+        #| "group by user id" >> GroupByKey()
+        | "test" >> ParDo(test)
     )
-except Exception as e:
-    print(e)
+
+#(
+#    user_tags
+#    | "print" >> Map(lambda element: print_element(element))
+#)

@@ -1,2 +1,7 @@
-boto3
-apache-beam
+apache_beam==2.54.0
+aws_msk_iam_sasl_signer_python==1.0.1
+beam_nuggets==0.18.1
+boto3==1.34.49
+botocore==1.34.49
+kafka_python==2.0.2
+pymongo==4.6.2
