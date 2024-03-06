@@ -10,6 +10,8 @@ from apache_beam.transforms.window import FixedWindows
 from apache_beam.transforms.trigger import Always
 from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions, StandardOptions
 
+from apache_beam import window
+
 class MSKTokenProvider():
     def token(self):
         from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
@@ -47,19 +49,23 @@ def print_element(elem):
     return elem
 
 def filter_out_nomes(log):
-  if log[0] is not None:
-    json_log = json.loads(log[1])
-    page_url = json_log["pageUrl"] if "pageUrl" in json_log else None
-    log_type = json_log["type"] if "type" in json_log else None
+    if log[0] is not None:
+        json_log = json.loads(log[1])
+        page_url = json_log["pageUrl"] if "pageUrl" in json_log else None
+        log_type = json_log["type"] if "type" in json_log else None
 
-    if (not (page_url is None or log_type is None) and
-        isinstance(page_url, str) and str(page_url).lower().find("openstreetmap") > -1 and
-        isinstance(log_type, str) and str(log_type).lower() == "visit"):
-        yield log
-  else:
-    print('we found a none! get it out')
+        if (not (page_url is None or log_type is None) and
+            isinstance(page_url, str) and str(page_url).lower().find("openstreetmap") > -1 and
+            isinstance(log_type, str) and str(log_type).lower() == "visit"):
+            yield log
+
+def extract_name(elem):
+    json_log = json.loads(elem[1])
+    if "details" in json_log and "name" in json_log["details"]:
+        yield json_log["details"]["name"]
 
 def test(elem):
+    print(elem)
     return elem
 
 region = "us-east-1"
@@ -106,7 +112,10 @@ with Pipeline(options=pl_options) as pipeline:
         #    accumulation_mode=AccumulationMode.ACCUMULATING
         #)
         | "filter out NOME logs" >> ParDo(filter_out_nomes)
-        #| "group by user id" >> GroupByKey()
+        | "Extract annotation name" >> ParDo(extract_name)
+        # TODO: extract log timestamp for windowing (currently beam ingestion time)
+        | 'window' >> beam.WindowInto(window.Sessions(10 * 60)) # 10 min dead time (no visit) per user
+        # TODO: call prediction model when window closes
         | "test" >> ParDo(test)
     )
 
