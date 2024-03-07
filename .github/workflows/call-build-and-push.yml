@@ -1,0 +1,9 @@
+name: Build and Push Image to ECR
+run-name: Build for Commit ${{ github.sha }}
+on:
+  push:
+    branches: [ main ]
+jobs:
+  call-build-and-push:
+    uses: UMD-ARLIS/odni-k8s-app-manifests/.github/workflows/build-and-push-image-to-ecr.yml@main
+    secrets: inherit
